@@ -417,7 +417,7 @@ plm_frame_t *plm_seek_frame(plm_t *self, double time, int seek_exact);
 // The default size for buffers created from files or by the high-level API
 
 #ifndef PLM_BUFFER_DEFAULT_SIZE
-#define PLM_BUFFER_DEFAULT_SIZE (32 * 1024)
+#define PLM_BUFFER_DEFAULT_SIZE (32 * 1024) // TODO 128 instead of 32
 #endif
 
 
@@ -1649,6 +1649,26 @@ inline int plm_buffer_has(plm_buffer_t *self, size_t count) {
 	return FALSE;
 }
 
+#if 0
+uint64_t plm_buffer_showbits(plm_buffer_t *self) {
+	if (!plm_buffer_has(self, 64))
+		return 0;
+
+	typedef uint64_t u_uint64_t __attribute__((aligned(1)));
+
+	uint64_t bits = *(u_uint64_t*)&self->bytes[self->bit_index >> 3];
+	bits <<= self->bit_index & 7;
+	return bits;
+}
+
+uint64_t plm_buffer_showbits2(plm_buffer_t *self) {
+	typedef uint64_t u_uint64_t __attribute__((aligned(1)));
+	uint64_t bits = *(u_uint64_t*)&self->bytes[self->bit_index >> 3];
+	bits <<= self->bit_index & 7;
+	return bits;
+}
+#endif
+
 inline int plm_buffer_read(plm_buffer_t *self, int count) {
 	if (!plm_buffer_has(self, count)) {
 		return 0;
@@ -1732,6 +1752,39 @@ inline int plm_buffer_has_start_code(plm_buffer_t *self, int code) {
 	self->discard_read_bytes = previous_discard_read_bytes;
 	return current;
 }
+
+#if 0
+int plm_buffer_no_start_code(plm_buffer_t *self) {
+	if (!plm_buffer_has(self, (5 << 3))) {
+		return FALSE;
+	}
+
+	size_t byte_index = ((self->bit_index + 7) >> 3);
+	return !(
+		self->bytes[byte_index] == 0x00 &&
+		self->bytes[byte_index + 1] == 0x00 &&
+		self->bytes[byte_index + 2] == 0x01
+	);
+}
+
+int16_t plm_buffer_read_vlc_bits(plm_buffer_t *self, const plm_vlc_t *table, uint64_t bits) {
+	plm_vlc_t state = {0, 0};
+	do {
+		state = table[state.index + (bits >> 63)];
+		bits <<= 1;
+		self->bit_index++;
+	} while (state.index > 0);
+	return state.value;
+}
+
+int16_t plm_buffer_read_vlc(plm_buffer_t *self, const plm_vlc_t *table) {
+	return plm_buffer_read_vlc_bits(self, table, plm_buffer_showbits(self));
+}
+
+uint16_t plm_buffer_read_vlc_uint_bits(plm_buffer_t *self, const plm_vlc_uint_t *table, uint64_t bits) {
+	return (uint16_t)plm_buffer_read_vlc_bits(self, (const plm_vlc_t *)table, bits);
+}
+#endif
 
 inline int plm_buffer_peek_non_zero(plm_buffer_t *self, int bit_count) {
 	if (!plm_buffer_has(self, bit_count)) {
@@ -2679,7 +2732,7 @@ struct plm_video_t {
 
 	uint8_t *frames_data;
 
-	int block_data[64];
+	int block_data[64]; // TODO int16_t
 	uint8_t intra_quant_matrix[64];
 	uint8_t non_intra_quant_matrix[64];
 
@@ -2703,6 +2756,7 @@ void plm_video_decode_picture(plm_video_t *self);
 void plm_video_decode_slice(plm_video_t *self, int slice);
 void plm_video_decode_macroblock(plm_video_t *self);
 void plm_video_decode_motion_vectors(plm_video_t *self);
+//int plm_video_decode_motion_vector(plm_video_t *self, int r_size, int motion);
 void plm_video_predict_macroblock(plm_video_t *self);
 void plm_video_copy_macroblock(uint32_t *dest, plm_frame_t *reference, int motion_h, int motion_v);
 void plm_video_interpolate_macroblock(uint32_t *dest, plm_frame_t *reference, int motion_h, int motion_v);
@@ -2787,6 +2841,7 @@ plm_frame_t *plm_video_decode(plm_video_t *self) {
 	plm_frame_t *frame = NULL;
 	do {
 		if (self->start_code != PLM_START_PICTURE) {
+			// TODO Profile how long this line below takes
 			self->start_code = plm_buffer_find_start_code(self->buffer, PLM_START_PICTURE);
 
 			if (self->start_code == -1) {
@@ -2814,12 +2869,14 @@ plm_frame_t *plm_video_decode(plm_video_t *self) {
 		// of the next picture. Also, if we didn't find the start code for the
 		// next picture, but the source has ended, we assume that this last
 		// picture is in the buffer.
+		// TODO Profile how long this if statement takes
 		if (
 			plm_buffer_has_start_code(self->buffer, PLM_START_PICTURE) == -1 &&
 			!plm_buffer_has_ended(self->buffer)
 		) {
 			return NULL;
 		}
+		// TODO skip plm_buffer_discard_read_bytes() by commenting it out
 		plm_buffer_discard_read_bytes(self->buffer);
 		plm_video_decode_picture(self);
 
@@ -2894,6 +2951,7 @@ int plm_video_decode_sequence_header(plm_video_t *self) {
 	else {
 		memcpy(self->intra_quant_matrix, PLM_VIDEO_INTRA_QUANT_MATRIX, 64);
 	}
+	// rsp_mpeg1_set_quant_matrix(true, self->intra_quant_matrix);
 
 	// Load custom non intra quant matrix?
 	if (plm_buffer_read(self->buffer, 1)) {
@@ -2905,6 +2963,7 @@ int plm_video_decode_sequence_header(plm_video_t *self) {
 	else {
 		memcpy(self->non_intra_quant_matrix, PLM_VIDEO_NON_INTRA_QUANT_MATRIX, 64);
 	}
+	// rsp_mpeg1_set_quant_matrix(false, self->non_intra_quant_matrix);
 
 	self->mb_width = (self->width + 15) >> 4;
 	self->mb_height = (self->height + 15) >> 4;
@@ -2921,6 +2980,12 @@ int plm_video_decode_sequence_header(plm_video_t *self) {
 	size_t luma_plane_size = self->luma_width * self->luma_height;
 	size_t chroma_plane_size = self->chroma_width * self->chroma_height;
 	size_t frame_data_size = (luma_plane_size + 2 * chroma_plane_size);
+
+	// TODO 
+	// self->frames_data = (uint8_t*)PLM_MALLOC(frame_data_size * 3);
+	// plm_video_init_frame(self, &self->frame_current, self->frames_data + frame_data_size * 0);
+	// plm_video_init_frame(self, &self->frame_forward, self->frames_data + frame_data_size * 1);
+	// plm_video_init_frame(self, &self->frame_backward, self->frames_data + frame_data_size * 2);
 
 	// 32byte align
 	self->frames_data = (uint8_t*)PLM_MALLOC(frame_data_size * 3 * 2 + 31);
@@ -2951,6 +3016,7 @@ void plm_video_init_frame(plm_video_t *self, plm_frame_t *frame, uint8_t *base) 
 	frame->cb.height = self->chroma_height;
 	frame->cb.data = base + luma_plane_size + chroma_plane_size;
 
+	// TODO New property?
 	frame->display = (uint32_t *)(base + luma_plane_size + chroma_plane_size * 2);
 }
 
@@ -3007,6 +3073,7 @@ void plm_video_decode_picture(plm_video_t *self) {
 	);
 
 	// Decode all slices
+	// TODO Profile this while loop
 	while (PLM_START_IS_SLICE(self->start_code)) {
 		plm_video_decode_slice(self, self->start_code & 0x000000FF);
 		if (self->macroblock_address >= self->mb_size - 2) {
@@ -3019,6 +3086,7 @@ void plm_video_decode_picture(plm_video_t *self) {
 	if (self->picture_type == PLM_VIDEO_PICTURE_TYPE_INTRA ||
 		self->picture_type == PLM_VIDEO_PICTURE_TYPE_PREDICTIVE)
 	{
+		// TODO Dreamcast CUSTOM ALGO
 		uint32_t *d_y = (uint32_t *)self->frame_current.y.data;
 		uint32_t *d_cr = (uint32_t *)self->frame_current.cr.data;
 		uint32_t *d_cb = (uint32_t *)self->frame_current.cb.data;
@@ -3122,9 +3190,11 @@ void plm_video_decode_slice(plm_video_t *self, int slice) {
 	}
 
 	do {
+		// TODO Profile this line
 		plm_video_decode_macroblock(self);
 	} while (
 		self->macroblock_address < self->mb_size - 1 &&
+		// Replace with plm_buffer_no_start_code(self->buffer)
 		plm_buffer_peek_non_zero(self->buffer, 23)
 	);
 }
@@ -3231,6 +3301,7 @@ void plm_video_decode_macroblock(plm_video_t *self) {
 	}
 
 	// Decode blocks
+	// TODO plm_buffer_has(self->buffer, 128*8);
 	int cbp = ((self->macroblock_type & 0x02) != 0)
 		? plm_buffer_read_vlc(self->buffer, PLM_VIDEO_CODE_BLOCK_PATTERN)
 		: (self->macroblock_intra ? 0x3f : 0);
@@ -3269,7 +3340,7 @@ void plm_video_decode_macroblock(plm_video_t *self) {
 } while (FALSE)
 
 void plm_video_decode_motion_vectors(plm_video_t *self) {
-
+	// TODO Profile function time whole
 	// Forward
 	if (self->motion_forward.is_set) {
 		int r_size = self->motion_forward.r_size;
@@ -3725,6 +3796,8 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 	// Decode AC coefficients (+DC for non-intra)
 	int level = 0;
 	while (TRUE) {
+	// TODO Put generated tables here
+
 		int run = 0;
 		uint16_t coeff = plm_buffer_read_vlc_uint(self->buffer, PLM_VIDEO_DCT_COEFF);
 
@@ -3756,6 +3829,7 @@ void plm_video_decode_block(plm_video_t *self, int block) {
 
 		n += run;
 		if (n < 0 || n >= 64) {
+			fprintf(stderr, "INVALID AC COEFF\n");
 			return; // invalid
 		}
 
@@ -4258,7 +4332,7 @@ plm_audio_t *plm_audio_create_with_buffer(plm_buffer_t *buffer, int destroy_when
 
 	//memcpy(self->D, PLM_AUDIO_SYNTHESIS_WINDOW, 512 * sizeof(float));
 	//memcpy(self->D + 512, PLM_AUDIO_SYNTHESIS_WINDOW, 512 * sizeof(float));
-
+	// TODO look into
 	float *d = self->D;
 	float *s = (float *)PLM_AUDIO_SYNTHESIS_WINDOW;
 	for (int i = 0; i < 32; i++)
